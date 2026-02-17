@@ -1,6 +1,6 @@
 import time
 import pandas as pd
-from datetime import datetime  # Neu für die Formatierung
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -10,17 +10,73 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# --- KONFIGURATION ---
+# ==========================================
+#  KONFIGURATION
+# ==========================================
 URL = "https://booking.roadsurfer.com/rally/?currency=EUR"
-TEST_MODE = True
+TEST_MODE = True  # True = Nur erste 3 Treffer testen
+
+# WÄHLE DEINE LÄNDER (Namen genau wie in der h6-Überschrift):
+# ["Deutschland"] -> Nur deutsche Städte
+# ["USA", "Kanada"] -> Nordamerika
+# ["ALL"] -> Alles weltweit
+TARGET_COUNTRIES = ["USA"]
 
 
 def format_date_de(date_str):
-    """Wandelt YYYY-MM-DD in DD.MM.YYYY um."""
     try:
         return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
     except:
         return date_str
+
+
+def get_stations_from_popup(driver):
+    """
+    Liest die Stationen direkt aus dem Overlay-Popup, gruppiert nach Ländern.
+    """
+    stations_to_check = []
+
+    try:
+        # Popup öffnen (falls noch nicht offen)
+        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CLASS_NAME, "search-input"))).click()
+        time.sleep(1.5)
+
+        # Wir suchen alle Länder-Container
+        # Die Struktur ist: h6.country-name -> ul.stations-list -> li.station-item
+
+        # Finde alle Länder-Überschriften
+        country_headers = driver.find_elements(By.CSS_SELECTOR, "h6.country-name")
+
+        print("\n--- Gefundene Länder im Popup ---")
+        for header in country_headers:
+            country_name = header.text.strip()
+            print(f"• {country_name}")
+
+            # Prüfen ob wir das Land wollen
+            if "ALL" in TARGET_COUNTRIES or country_name in TARGET_COUNTRIES:
+                # Finde die dazugehörige Liste (das nächste Sibling-Element)
+                # XPath: Finde das ul, das direkt nach diesem h6 kommt
+                try:
+                    # Wir nutzen JavaScript, um das nächste Element zu finden (stabiler als XPath Sibling)
+                    ul_element = driver.execute_script("return arguments[0].nextElementSibling;", header)
+
+                    if ul_element and ul_element.tag_name == "ul":
+                        items = ul_element.find_elements(By.CSS_SELECTOR, "li.station-item span.flex-none")
+                        for item in items:
+                            city = item.text.strip()
+                            if city:
+                                stations_to_check.append(city)
+                except Exception as e:
+                    print(f"  [!] Fehler beim Lesen von {country_name}: {e}")
+
+        # Popup wieder schließen
+        driver.execute_script("document.body.click();")
+
+        return sorted(list(set(stations_to_check)))
+
+    except Exception as e:
+        print(f"[!] Fehler beim Stations-Scan: {e}")
+        return []
 
 
 def run():
@@ -41,21 +97,28 @@ def run():
             shadow = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "usercentrics-root"))).shadow_root
             shadow.find_element(By.CSS_SELECTOR, "button[data-testid='uc-accept-all-button']").click()
+            print(">>> Cookies akzeptiert.")
         except:
             pass
 
         # 2. Stationen scannen
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CLASS_NAME, "search-input"))).click()
-        time.sleep(2)
-        all_stations = sorted(list(
-            set([s.text for s in driver.find_elements(By.CSS_SELECTOR, "li.station-item span.flex-none") if
-                 s.text.strip()])))
-        driver.execute_script("document.body.click();")
+        print(">>> Analysiere verfügbare Stationen...")
+        check_list = get_stations_from_popup(driver)
 
-        check_list = all_stations if TEST_MODE else all_stations
+        print(f"--------------------------------------------------")
+        print(f"AUSWAHL: {', '.join(TARGET_COUNTRIES)}")
+        print(f"GEFUNDEN: {len(check_list)} Stationen.")
+        print(f"--------------------------------------------------")
 
-        for start_node in check_list:
-            print(f"\n=== PRÜFE AB: {start_node} ===")
+        if not check_list:
+            print("[!] Keine Stationen gefunden. Prüfe die Schreibweise der Länder.")
+            return
+
+        if TEST_MODE: check_list = check_list[:3]
+
+        # --- HAUPTSCHLEIFE ---
+        for i, start_node in enumerate(check_list, 1):
+            print(f"\n=== [{i}/{len(check_list)}] PRÜFE AB: {start_node} ===")
             driver.get(URL)
             time.sleep(4)
 
@@ -66,9 +129,15 @@ def run():
                 driver.execute_script("arguments[0].click();", inp[0])
                 ActionChains(driver).send_keys(start_node).pause(1).perform()
 
-                start_item = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, f"//li//span[contains(text(), '{start_node}')]")))
-                driver.execute_script("arguments[0].click();", start_item)
+                # Gezielter Klick auf das Element im Popup
+                try:
+                    xpath = f"//li[contains(@class, 'station-item')]//span[contains(text(), '{start_node}')]"
+                    start_item = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                    driver.execute_script("arguments[0].click();", start_item)
+                except:
+                    # Fallback
+                    ActionChains(driver).send_keys(Keys.ENTER).perform()
+
                 time.sleep(1)
                 ActionChains(driver).send_keys(Keys.ESCAPE).perform()
 
@@ -78,61 +147,81 @@ def run():
                 driver.execute_script("arguments[0].click();", oneway_btn)
                 time.sleep(2)
 
-                # C. Ziele auslesen
+                # C. Ziele auslesen (Alle möglichen, da man auch ins Ausland fahren kann)
                 inp = driver.find_elements(By.CLASS_NAME, "search-input")
                 driver.execute_script("arguments[0].click();", inp[1])
                 time.sleep(2)
-                valid_destinations = sorted(list(
-                    set([s.text for s in driver.find_elements(By.CSS_SELECTOR, "li.station-item span.flex-none") if
-                         s.text.strip()])))
+
+                # Wir holen ALLE Ziele aus dem Popup
+                all_destinations_raw = driver.find_elements(By.CSS_SELECTOR, "li.station-item span.flex-none")
+                valid_destinations = sorted(list(set([s.text.strip() for s in all_destinations_raw if s.text.strip()])))
+
                 ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                 print(f"   -> {len(valid_destinations)} Ziele gefunden.")
 
                 for end_node in valid_destinations:
                     if end_node == start_node: continue
+
                     print(f"      -> Check {end_node}...", end="", flush=True)
 
                     try:
                         # D. Zielort setzen
-                        inp = driver.find_elements(By.CLASS_NAME, "search-input")
+                        inp = WebDriverWait(driver, 5).until(lambda d: d.find_elements(By.CLASS_NAME, "search-input"))
                         driver.execute_script("arguments[0].click();", inp[1])
                         time.sleep(0.5)
+
                         ActionChains(driver).send_keys(end_node).pause(1).perform()
 
-                        end_item = WebDriverWait(driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, f"//li//span[contains(text(), '{end_node}')]")))
+                        # Klick auf Ziel
+                        xpath_end = f"//li[contains(@class, 'station-item')]//span[contains(text(), '{end_node}')]"
+                        end_item = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_end)))
                         driver.execute_script("arguments[0].click();", end_item)
 
                         time.sleep(0.5)
                         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                         driver.execute_script("document.body.click();")
 
-                        WebDriverWait(driver, 8).until_not(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, ".search-dates .disabled")))
-                        time.sleep(1)
+                        # Check ob Rally verfügbar (disabled weg?)
+                        try:
+                            WebDriverWait(driver, 6).until_not(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, ".search-dates .disabled")))
+                        except:
+                            print(" (Keine Rally)", end="")
+                            continue
 
                         # E. Kalender öffnen
                         date_input = driver.find_element(By.CSS_SELECTOR, ".search-dates .search-input")
                         driver.execute_script("arguments[0].click();", date_input)
                         time.sleep(2)
 
-                        # F. Daten sammeln & Formatieren
-                        js_find = "return Array.from(document.querySelectorAll('div[data-testid=\"calendar-day\"]:not(.is-disabled)')).map(d => d.getAttribute('data-date')).filter(d => d !== null);"
-                        all_dates_raw = driver.execute_script(js_find)
+                        # F. Daten sammeln
+                        all_dates_raw = []
+                        for _ in range(4):
+                            js_find = "return Array.from(document.querySelectorAll('div[data-testid=\"calendar-day\"]:not(.is-disabled)')).map(d => d.getAttribute('data-date')).filter(d => d !== null);"
+                            found = driver.execute_script(js_find)
+                            if found: all_dates_raw.extend(found)
+
+                            try:
+                                next_btn = driver.find_elements(By.CSS_SELECTOR,
+                                                                "button.calendar__month-pfeil-rechts, .modal__window header button")[
+                                    -1]
+                                driver.execute_script("arguments[0].click();", next_btn)
+                                time.sleep(0.8)
+                            except:
+                                break
 
                         if all_dates_raw:
                             all_dates_raw = sorted(list(set(all_dates_raw)))
+                            von_fmt = format_date_de(all_dates_raw[0])
+                            bis_fmt = format_date_de(all_dates_raw[-1])
 
-                            # DATUM FORMATIEREN (TT.MM.JJJJ)
-                            von_formatted = format_date_de(all_dates_raw[0])
-                            bis_formatted = format_date_de(all_dates_raw[-1])
-
-                            print(f" TREFFER! ({von_formatted} bis {bis_formatted})")
+                            print(f" TREFFER! ({von_fmt} - {bis_fmt})")
                             results.append({
+                                "Start-Land": TARGET_COUNTRIES[0] if len(TARGET_COUNTRIES) == 1 else "Mix",
                                 "Start": start_node,
                                 "Ziel": end_node,
-                                "Von": von_formatted,
-                                "Bis": bis_formatted
+                                "Von": von_fmt,
+                                "Bis": bis_fmt
                             })
                         else:
                             print(" -")
@@ -152,8 +241,11 @@ def run():
     finally:
         driver.quit()
         if results:
-            pd.DataFrame(results).to_excel("roadsurfer_final.xlsx", index=False)
-            print("\nFERTIG! Daten wurden im Format TT.MM.JJJJ gespeichert.")
+            fname = "roadsurfer_results.xlsx"
+            if "ALL" not in TARGET_COUNTRIES:
+                fname = f"roadsurfer_{'_'.join(TARGET_COUNTRIES)}.xlsx"
+            pd.DataFrame(results).to_excel(fname, index=False)
+            print(f"\nFERTIG! Datei: {fname}")
 
 
 if __name__ == "__main__":
