@@ -1,6 +1,6 @@
 import time
 import pandas as pd
-import os  # <--- NEU: Für Ordner-Erstellung
+import os
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -15,9 +15,15 @@ from webdriver_manager.chrome import ChromeDriverManager
 #  KONFIGURATION
 # ==========================================
 URL = "https://booking.roadsurfer.com/rally/?currency=EUR"
-TEST_MODE = True  # True = Prüft nur die ersten 3 Städte pro Land
 
-# Name des Ordners, in dem die Dateien landen sollen
+# True  = Browser ist unsichtbar (Hintergrund) -> Empfohlen
+# False = Du siehst den Browser arbeiten
+HEADLESS_MODE = True
+
+# True = Testmodus (nur erste 3 Städte pro Land werden geprüft)
+# False = ALLES wird geprüft (für den echten Einsatz!)
+TEST_MODE = True
+
 OUTPUT_FOLDER = "Roadsurfer_Ergebnisse"
 
 
@@ -36,11 +42,19 @@ def setup_driver():
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+    if HEADLESS_MODE:
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1920,1080")
+        print(">>> Browser startet im HINTERGRUND (Headless)...")
+    else:
+        print(">>> Browser startet sichtbar...")
+
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
 
 def scan_available_countries_and_cities(driver):
-    print(">>> Öffne Webseite zum Scannen der Länder...")
+    print(">>> Lade Webseite und scanne Struktur...")
     driver.get(URL)
     time.sleep(4)
 
@@ -78,14 +92,14 @@ def scan_available_countries_and_cities(driver):
 
 def ask_user_for_countries(data_map):
     sorted_countries = sorted(data_map.keys())
-    print("\n" + "=" * 40)
-    print(" VERFÜGBARE LÄNDER")
-    print("=" * 40)
+    print("\n" + "=" * 50)
+    print(" SCHRITT 1: LÄNDER AUSWAHL")
+    print("=" * 50)
     for i, country in enumerate(sorted_countries, 1):
-        print(f" [{i}] {country} ({len(data_map[country])} Stationen)")
+        print(f" [{i}] {country}")
 
     print("\nGib die Nummern ein (z.B. '1, 3') oder 'ALL' für alle.")
-    user_input = input("DEINE LÄNDER-WAHL: ").strip()
+    user_input = input("DEINE LÄNDER: ").strip()
 
     selected_countries = []
     if user_input.upper() == "ALL": return sorted_countries
@@ -102,12 +116,52 @@ def ask_user_for_countries(data_map):
     return selected_countries
 
 
+def ask_user_for_cities_in_country(country, city_list):
+    print("\n" + "-" * 50)
+    print(f" SCHRITT 2: STÄDTE IN {country.upper()}")
+    print("-" * 50)
+
+    for i, city in enumerate(city_list, 1):
+        print(f" [{i}] {city}")
+
+    print("\nGib die Nummern ein (z.B. '1, 2') für bestimmte Städte.")
+    print("Drücke einfach [ENTER], um ALLE Städte in diesem Land zu prüfen.")
+
+    user_input = input(f"Auswahl für {country}: ").strip()
+
+    if not user_input or user_input.upper() == "ALL":
+        if TEST_MODE:
+            print(f"   -> Nehme alle (Test-Modus: nur die ersten 3)")
+            return city_list[:3]
+        else:
+            print(f"   -> Nehme alle {len(city_list)} Städte.")
+            return city_list
+
+    selected_cities = []
+    try:
+        parts = [p.strip() for p in user_input.split(",")]
+        for p in parts:
+            if p.isdigit():
+                idx = int(p) - 1
+                if 0 <= idx < len(city_list):
+                    selected_cities.append(city_list[idx])
+    except:
+        pass
+
+    if not selected_cities:
+        print("   -> Keine gültige Auswahl, nehme alle (Fallback).")
+        return city_list
+
+    print(f"   -> {len(selected_cities)} Städte ausgewählt.")
+    return selected_cities
+
+
 def ask_user_for_start_date():
-    print("\n" + "=" * 40)
-    print(" FRÜHESTES ABHOL-DATUM")
-    print("=" * 40)
-    print("Ab wann möchtest du reisen? (Format: TT.MM.JJJJ)")
-    print("Drücke einfach [ENTER], um ab HEUTE zu suchen.")
+    print("\n" + "=" * 50)
+    print(" SCHRITT 3: AB WANN REISEN?")
+    print("=" * 50)
+    print("Format: TT.MM.JJJJ (z.B. 01.06.2026)")
+    print("Drücke [ENTER] für Suche ab HEUTE.")
 
     while True:
         user_input = input("DATUM: ").strip()
@@ -116,44 +170,50 @@ def ask_user_for_start_date():
         try:
             return datetime.strptime(user_input, "%d.%m.%Y")
         except ValueError:
-            print(">> Falsches Format! Bitte benutze TT.MM.JJJJ")
+            print(">> Falsches Format!")
 
 
 def run():
-    # --- 0. ORDNER ERSTELLEN ---
     if not os.path.exists(OUTPUT_FOLDER):
         os.makedirs(OUTPUT_FOLDER)
-        print(f">>> Ordner '{OUTPUT_FOLDER}' erstellt.")
-    else:
-        print(f">>> Speichere in Ordner: '{OUTPUT_FOLDER}'")
 
-    # 1. INITIALISIERUNG
     driver = setup_driver()
+
     try:
+        # 1. Alles scannen
         available_data = scan_available_countries_and_cities(driver)
     except Exception as e:
         print(f"Fehler: {e}")
         driver.quit();
         return
 
-    # 2. USER INTERACTION
+    # 2. Länder wählen
     target_countries = ask_user_for_countries(available_data)
     if not target_countries: driver.quit(); return
 
-    min_start_date = ask_user_for_start_date()
-    print(f"\n>>> Suche ab dem: {min_start_date.strftime('%d.%m.%Y')}")
-
+    # 3. Städte wählen
     final_check_list = []
     for country in target_countries:
-        cities = available_data[country]
-        if TEST_MODE: cities = cities[:3]
-        for city in cities:
+        all_cities = available_data[country]
+        chosen_cities = ask_user_for_cities_in_country(country, all_cities)
+        for city in chosen_cities:
             final_check_list.append({"city": city, "country": country})
 
-    print(f">>> {len(final_check_list)} Stationen werden geprüft.")
+    if not final_check_list:
+        print("Keine Städte ausgewählt. Ende.")
+        driver.quit();
+        return
+
+    # 4. Datum wählen
+    min_start_date = ask_user_for_start_date()
+
+    print(f"\n" + "#" * 50)
+    print(f" STARTE SUCHE... ({len(final_check_list)} Stationen)")
+    print(f" Ab Datum: {min_start_date.strftime('%d.%m.%Y')}")
+    print(f" Modus: {'HEADLESS (Unsichtbar)' if HEADLESS_MODE else 'SICHTBAR'}")
+    print("#" * 50)
     time.sleep(2)
 
-    # 3. SUCHE
     results = []
 
     try:
@@ -181,7 +241,7 @@ def run():
                 time.sleep(1)
                 ActionChains(driver).send_keys(Keys.ESCAPE).perform()
 
-                # B. One-Way
+                # B. One-Way Button
                 oneway_btn = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".search-return .cursor-pointer")))
                 driver.execute_script("arguments[0].click();", oneway_btn)
@@ -216,16 +276,18 @@ def run():
                         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                         driver.execute_script("document.body.click();")
 
+                        # Prüfen ob Kalender da ist
                         try:
                             WebDriverWait(driver, 6).until_not(
                                 EC.presence_of_element_located((By.CSS_SELECTOR, ".search-dates .disabled")))
                         except:
-                            print(" (Keine Rally)", end="")
+                            print(" (Nicht verfügbar)", end="")
                             continue
 
                         date_input = driver.find_element(By.CSS_SELECTOR, ".search-dates .search-input")
                         driver.execute_script("arguments[0].click();", date_input)
-                        time.sleep(2)
+
+                        time.sleep(2.5)
 
                         all_dates_raw = []
                         for _ in range(4):
@@ -243,12 +305,18 @@ def run():
 
                         if all_dates_raw:
                             all_dates_raw = sorted(list(set(all_dates_raw)))
-                            first_date_obj = datetime.strptime(all_dates_raw[0], "%Y-%m-%d")
+                            first_date_str = all_dates_raw[0]
+                            last_date_str = all_dates_raw[-1]
+
+                            first_date_obj = datetime.strptime(first_date_str, "%Y-%m-%d")
 
                             if first_date_obj >= min_start_date:
-                                von_fmt = format_date_de(all_dates_raw[0])
-                                bis_fmt = format_date_de(all_dates_raw[-1])
-                                print(f" TREFFER! ({von_fmt})")
+                                von_fmt = format_date_de(first_date_str)
+                                bis_fmt = format_date_de(last_date_str)
+
+                                # Anzeige im Terminal ohne Tage
+                                print(f" TREFFER! ({von_fmt} - {bis_fmt})")
+
                                 results.append({
                                     "Land": country,
                                     "Start": start_node,
@@ -257,9 +325,9 @@ def run():
                                     "Bis": bis_fmt
                                 })
                             else:
-                                print(f" (Zu früh: {format_date_de(all_dates_raw[0])})")
+                                print(f" (Zu früh: {format_date_de(first_date_str)})")
                         else:
-                            print(" -")
+                            print(" (Keine Termine)", end="")
 
                         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                         time.sleep(0.5)
@@ -271,28 +339,27 @@ def run():
             except Exception:
                 print(f"   [!] Fehler bei {start_node}.")
 
-            # --- BACKUP IN ORDNER SPEICHERN ---
             if results:
-                backup_path = os.path.join(OUTPUT_FOLDER, "rally_backup.xlsx")
-                pd.DataFrame(results).to_excel(backup_path, index=False)
+                pd.DataFrame(results).to_excel(os.path.join(OUTPUT_FOLDER, "rally_backup.xlsx"), index=False)
 
     finally:
         driver.quit()
         if results:
             date_part = min_start_date.strftime("%Y-%m-%d")
-            if len(target_countries) > 3:
-                country_part = "Mehrere_Laender"
+
+            if len(target_countries) == 1:
+                name_part = target_countries[0]
+            elif len(target_countries) <= 3:
+                name_part = "_".join(target_countries).replace(" ", "")
             else:
-                country_part = "_".join(target_countries).replace(" ", "")
+                name_part = "Mehrere_Laender"
 
-            filename = f"Roadsurfer_{country_part}_ab_{date_part}.xlsx"
-
-            # --- FINALEN PFAD ZUSAMMENBAUEN ---
+            filename = f"Roadsurfer_{name_part}_ab_{date_part}.xlsx"
             full_path = os.path.join(OUTPUT_FOLDER, filename)
 
             pd.DataFrame(results).to_excel(full_path, index=False)
             print(f"\nFERTIG! {len(results)} Routen gefunden.")
-            print(f"Datei gespeichert unter: {full_path}")
+            print(f"Datei gespeichert: {full_path}")
         else:
             print("\nKeine passenden Routen gefunden.")
 
